@@ -9,6 +9,9 @@ import (
   "fmt"
   "os"
   "strings"
+  "net/http"
+  "io/ioutil"
+  simplejson "github.com/bitly/go-simplejson"
   configfile "github.com/crowdmob/goconfig"
   // "github.com/crowdmob/goamz/aws"
   // "github.com/crowdmob/goamz/s3"
@@ -150,9 +153,17 @@ func main() {
   // Read config file
   parseConfigfile()
   
-  fmt.Printf("Got redshift tables: %#v\n", cfg.Redshift.Tables)
-  
   // Load schema json and check in redshift and migrate if needed
+  response, err := http.Get(cfg.Redshift.SchemaJsonUrl)
+  if err != nil { reportError("Couldn't load schema url: ", err) }
+  defer response.Body.Close()
+  schemaContents, err := ioutil.ReadAll(response.Body)
+  if err != nil { reportError("Couldn't read response body from schema url: ", err) }
+  schemaJson, err := simplejson.NewJson(schemaContents)
+  if err != nil { reportError("Couldn't parse json from schema url: ", err) }
+  
+  fmt.Printf("Got schema json: %#v\n", schemaJson)
+  
   // Startup goroutine for each Bucket/Prefix/Table
   
   // Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported.
