@@ -188,7 +188,8 @@ func main() {
   // Read config file
   parseConfigfile()
   
-  // Load schema json and check in redshift and migrate if needed
+  // ----------------------------- Load schema json and check in redshift and migrate if needed ----------------------------- 
+  
   response, err := http.Get(cfg.Redshift.SchemaJsonUrl)
   if err != nil { reportError("Couldn't load schema url: ", err) }
   defer response.Body.Close()
@@ -196,8 +197,7 @@ func main() {
   if err != nil { reportError("Couldn't read response body from schema url: ", err) }
   schemaJson, err := simplejson.NewJson(schemaContents)
   if err != nil { reportError("Couldn't parse json from schema url: ", err) }
-  fmt.Printf("SCHEMA JSON:::::::: %#v\n", schemaJson)
-  
+  if cfg.Default.Debug { fmt.Printf("Read schema json:\n %#v\n", schemaJson) }
   
   // Repeat per table
   currentTable := cfg.Redshift.Tables[0]
@@ -206,13 +206,14 @@ func main() {
   if err != nil { reportError("Couldn't connect to redshift database: ", err) }
   rows, err := db.Query(fmt.Sprintf("select COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where table_name = '%s' limit 1000", currentTable))
   if err != nil { reportError("Couldn't execute statement for table: ", err) }
+  if cfg.Default.Debug { fmt.Println("Looking for table, columns will display below.") }
   anyRows := false
   for rows.Next() {
     var column_name string
     var data_type string
     err = rows.Scan(& column_name, & data_type)
     if err != nil { reportError("Couldn't scan row for table: ", err) }
-    fmt.Printf("RESULT:::::::: %s | %s\n",  column_name, data_type)
+    if cfg.Default.Debug { fmt.Printf("   %s, %s\n",  column_name, data_type) }
     anyRows = true
   }
   
@@ -234,9 +235,13 @@ func main() {
     }
     _, err = db.Exec(createTableStmt)
     if err != nil { reportError("Unable to create table: ", err) }
+  } else {
+    if cfg.Default.Debug { fmt.Println("Table found, will not migrate") }
   }
   
-  // Startup goroutine for each Bucket/Prefix/Table
+  
+  // ----------------------------- Startup goroutine for each Bucket/Prefix/Table ----------------------------- 
+  
   
   // Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported.
   
