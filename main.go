@@ -11,8 +11,11 @@ import (
   "strings"
   "net/http"
   "io/ioutil"
+  "bytes"
   simplejson "github.com/bitly/go-simplejson"
   configfile "github.com/crowdmob/goconfig"
+  _ "github.com/bmizerany/pq"
+  "database/sql"
   // "github.com/crowdmob/goamz/aws"
   // "github.com/crowdmob/goamz/s3"
   // "github.com/crowdmob/goamz/exp/sns"
@@ -142,6 +145,38 @@ func parseConfigfile() {
   if err != nil { reportError("Couldn't parse config: ", err) }
 }
 
+func createTableStatement(tableName *string, columnsJson *simplejson.Json) string {
+  var buffer bytes.Buffer
+  buffer.WriteString("CREATE TABLE ")
+  buffer.WriteString(*tableName)
+  buffer.WriteString(" (\n")
+
+  columnsArry, err := columnsJson.Array()
+  if err != nil { reportError("Couldn't parse columns json: ", err) }
+  for i, _ := range columnsArry {
+    if i != 0 { buffer.WriteString(",\n") }
+    columnSchema := columnsJson.GetIndex(i)
+    columnName, err := columnSchema.Get("name").String()
+    if err != nil { reportError("Couldn't parse column name for table json: ", err) }
+    columnType, err := columnSchema.Get("type").String()
+    if err != nil { reportError("Couldn't parse column type for table json: ", err) }
+    buffer.WriteString(columnName)
+    buffer.WriteString(" ")
+    buffer.WriteString(columnType)
+    
+    if columnUnique, err := columnSchema.Get("unique").Bool(); err == nil && columnUnique {
+      buffer.WriteString(" UNIQUE")
+    }
+    
+    if columnNull, err := columnSchema.Get("null").Bool(); err == nil && !columnNull {
+      buffer.WriteString(" NOT NULL")
+    }
+  } 
+  buffer.WriteString("\n);")
+
+  return buffer.String()
+}
+
 func main() {
   flag.Parse()  // Read argv
   
@@ -161,8 +196,38 @@ func main() {
   if err != nil { reportError("Couldn't read response body from schema url: ", err) }
   schemaJson, err := simplejson.NewJson(schemaContents)
   if err != nil { reportError("Couldn't parse json from schema url: ", err) }
+  fmt.Printf("SCHEMA JSON:::::::: %#v\n", schemaJson)
   
-  fmt.Printf("Got schema json: %#v\n", schemaJson)
+  
+  // Repeat per table
+  currentTable := cfg.Redshift.Tables[0]
+  
+  db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=require", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
+  if err != nil { reportError("Couldn't connect to redshift database: ", err) }
+  rows, err := db.Query(fmt.Sprintf("select COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where table_name = '%s' limit 1000", currentTable))
+  if err != nil { reportError("Couldn't execute statement for table: ", err) }
+  anyRows := false
+  for rows.Next() {
+    var column_name string
+    var data_type string
+    err = rows.Scan(& column_name, & data_type)
+    if err != nil { reportError("Couldn't scan row for table: ", err) }
+    fmt.Printf("RESULT:::::::: %s | %s\n",  column_name, data_type)
+    anyRows = true
+  }
+  
+  if !anyRows {
+    tablesArry, err := schemaJson.Get("tables").Array()
+    if err != nil { reportError("Schema json error; expected tables element to be an array: ", err) }
+    tableIndex := -1
+    for i, _ := range tablesArry { 
+      if schemaJson.Get("tables").GetIndex(i).Get("name").MustString() == currentTable {
+        tableIndex = i
+        break
+      }
+    }
+    fmt.Println(createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns")))
+  }
   
   // Startup goroutine for each Bucket/Prefix/Table
   
