@@ -199,7 +199,8 @@ func main() {
   if err != nil { reportError("Couldn't parse json from schema url: ", err) }
   if cfg.Default.Debug { fmt.Printf("Read schema json:\n %#v\n", schemaJson) }
   
-  // Repeat per table
+  // ----------------------------- Startup goroutine for each Bucket/Prefix/Table & Repeat migration check per table ----------------------------- 
+  
   currentTable := cfg.Redshift.Tables[0]
   
   db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=require", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
@@ -240,13 +241,11 @@ func main() {
   }
   
   
-  // ----------------------------- Startup goroutine for each Bucket/Prefix/Table ----------------------------- 
   
+  // ----------------------------- Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported. -----------------------------
   
-  // Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported.
+  // ----------------------------- If not: run generic COPY for this Bucket/Prefix/Table -----------------------------
   
-  // If not: run generic COPY for this Bucket/Prefix/Table
-  
-  // If yes: diff STL_FILE_SCAN with S3 bucket files list, COPY and missing files into this Table
+  // ----------------------------- If yes: diff STL_FILE_SCAN with S3 bucket files list, COPY and missing files into this Table -----------------------------
   
 }
