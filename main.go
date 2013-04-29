@@ -226,7 +226,14 @@ func main() {
         break
       }
     }
-    fmt.Println(createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns")))
+    
+    createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"))
+    if cfg.Default.Debug {
+      fmt.Println("Creating table with:")
+      fmt.Println(createTableStmt)
+    }
+    _, err = db.Exec(createTableStmt)
+    if err != nil { reportError("Unable to create table: ", err) }
   }
   
   // Startup goroutine for each Bucket/Prefix/Table
