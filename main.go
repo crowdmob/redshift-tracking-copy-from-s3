@@ -8,6 +8,7 @@ import (
   "flag"
   "fmt"
   "os"
+  "time"
   "strings"
   "net/http"
   "io/ioutil"
@@ -145,6 +146,29 @@ func parseConfigfile() {
   if err != nil { reportError("Couldn't parse config: ", err) }
 }
 
+func defaultCopyStmt(currentTable *string, currentBucket *string, currentPrefix *string) string {
+  var buffer bytes.Buffer
+  buffer.WriteString("COPY ")
+  buffer.WriteString(*currentTable)
+  buffer.WriteString(" FROM 's3://")
+  buffer.WriteString(*currentBucket)
+  buffer.WriteString(*currentPrefix)
+  buffer.WriteString("' credentials 'aws_access_key_id=")
+  buffer.WriteString(cfg.Aws.Accesskey)
+  buffer.WriteString(";aws_secret_access_key=")
+  buffer.WriteString(cfg.Aws.Secretkey)
+  buffer.WriteString("'")
+  
+  if cfg.Redshift.Emptyasnull { buffer.WriteString(" emptyasnull") }
+  if cfg.Redshift.Blanksasnull { buffer.WriteString(" blanksasnull") }
+  if cfg.Redshift.Fillrecord { buffer.WriteString(" fillrecord") }
+  if cfg.Redshift.Maxerror > 0 { buffer.WriteString(" maxerror "); buffer.WriteString(fmt.Sprintf("%d", cfg.Redshift.Maxerror)) }
+  if len(cfg.Redshift.Delimiter) > 0 { buffer.WriteString(" delimiter "); buffer.WriteString(fmt.Sprintf("'%s'", cfg.Redshift.Delimiter)) }
+
+  buffer.WriteString(";")
+  return buffer.String()
+}
+
 func createTableStatement(tableName *string, columnsJson *simplejson.Json) string {
   var buffer bytes.Buffer
   buffer.WriteString("CREATE TABLE ")
@@ -201,12 +225,14 @@ func main() {
   
   // ----------------------------- Startup goroutine for each Bucket/Prefix/Table & Repeat migration check per table ----------------------------- 
   
-  currentTable := cfg.Redshift.Tables[0]
+  currentTable  := cfg.Redshift.Tables[0]
+  currentPrefix := cfg.S3.Prefixes[0]
+  currentBucket := cfg.S3.Buckets[0]
   
   db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=require", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
   if err != nil { reportError("Couldn't connect to redshift database: ", err) }
   rows, err := db.Query(fmt.Sprintf("select COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where table_name = '%s' limit 1000", currentTable))
-  if err != nil { reportError("Couldn't execute statement for table: ", err) }
+  if err != nil { reportError("Couldn't execute statement for INFORMATION_SCHEMA.COLUMNS: ", err) }
   if cfg.Default.Debug { fmt.Println("Looking for table, columns will display below.") }
   anyRows := false
   for rows.Next() {
@@ -228,7 +254,6 @@ func main() {
         break
       }
     }
-    
     createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"))
     if cfg.Default.Debug {
       fmt.Println("Creating table with:")
@@ -240,9 +265,40 @@ func main() {
     if cfg.Default.Debug { fmt.Println("Table found, will not migrate") }
   }
   
-  
-  
   // ----------------------------- Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported. -----------------------------
+  
+  loadedFiles := map[string]bool{}
+  
+  rows, err = db.Query(fmt.Sprintf("select * from STL_FILE_SCAN"))
+  if err != nil { reportError("Couldn't execute STL_FILE_SCAN: ", err) }
+  anyRows = false
+  for rows.Next() {
+    var (
+      userid    int
+      query     int
+      slice     int
+      name      string
+      lines     int64
+      bytes     int64
+      loadtime  int64
+      curtime   time.Time
+    )
+    err = rows.Scan(&userid, &query, &slice, &name, &lines, &bytes, &loadtime, &curtime)
+    if err != nil { reportError("Couldn't scan row for STL_FILE_SCAN: ", err) }
+    if cfg.Default.Debug { fmt.Printf("  Already loaded: %d|%d|%d|%s|%d|%d|%d|%s\n", userid, query, slice, name, lines, bytes, loadtime, curtime) }
+    loadedFiles[strings.TrimSpace(name)] = true
+    anyRows = true
+  }
+  
+  // no matching rows mean run a copy
+  if !anyRows {
+    copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &currentPrefix)
+    if cfg.Default.Debug { fmt.Printf("No records found in STL_FILE_SCAN, running `%s`\n", copyStmt) }
+    _, err = db.Exec(copyStmt)
+    if err != nil { reportError("Couldn't execute default copy statement: ", err) }
+  } else {
+    if cfg.Default.Debug { fmt.Printf("Records found, have to do manual copies (TODO)\n") }
+  }
   
   // ----------------------------- If not: run generic COPY for this Bucket/Prefix/Table -----------------------------
   
