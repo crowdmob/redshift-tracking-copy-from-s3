@@ -26,9 +26,7 @@ go run main.go -c <config_file_path>
 Deployment
 --------------------
 
-There's a Chef recipe to fetch and build this on any server, in progress.
-
-We'll make sure the recipe also works with Amazon OpsWorks, and we've been using it in a production environment.
+There's a Chef recipe to fetch and build this on any server, at: https://github.com/crowdmob/chef-redshift-tracking-copy-from-s3
 
 Configuration Options
 --------------------
