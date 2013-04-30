@@ -17,8 +17,8 @@ import (
   configfile "github.com/crowdmob/goconfig"
   _ "github.com/bmizerany/pq"
   "database/sql"
-  // "github.com/crowdmob/goamz/aws"
-  // "github.com/crowdmob/goamz/s3"
+  "github.com/crowdmob/goamz/aws"
+  "github.com/crowdmob/goamz/s3"
   // "github.com/crowdmob/goamz/exp/sns"
 )
 
@@ -152,6 +152,7 @@ func defaultCopyStmt(currentTable *string, currentBucket *string, currentPrefix 
   buffer.WriteString(*currentTable)
   buffer.WriteString(" FROM 's3://")
   buffer.WriteString(*currentBucket)
+  buffer.WriteString("/")
   buffer.WriteString(*currentPrefix)
   buffer.WriteString("' credentials 'aws_access_key_id=")
   buffer.WriteString(cfg.Aws.Accesskey)
@@ -290,18 +291,48 @@ func main() {
     anyRows = true
   }
   
-  // no matching rows mean run a copy
+  // ----------------------------- If not: run generic COPY for this Bucket/Prefix/Table -----------------------------
   if !anyRows {
     copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &currentPrefix)
     if cfg.Default.Debug { fmt.Printf("No records found in STL_FILE_SCAN, running `%s`\n", copyStmt) }
     _, err = db.Exec(copyStmt)
     if err != nil { reportError("Couldn't execute default copy statement: ", err) }
   } else {
-    if cfg.Default.Debug { fmt.Printf("Records found, have to do manual copies (TODO)\n") }
+    
+  // ----------------------------- If yes: diff STL_FILE_SCAN with S3 bucket files list, COPY and missing files into this Table -----------------------------
+    if cfg.Default.Debug { fmt.Printf("Records found, have to do manual copies from now on.\n") }
+    s3bucket := s3.New(aws.Auth{cfg.Aws.Accesskey, cfg.Aws.Secretkey}, aws.Regions[cfg.Aws.Region]).Bucket(currentBucket)
+    
+    // list all missing files and copy in the ones that are missing
+    nonLoadedFiles := []string{}
+    keyMarker := ""
+    moreResults := true
+    for moreResults {
+      results, err := s3bucket.List(currentPrefix, "", keyMarker, 0)
+      if err != nil { reportError("Couldn't list default s3 bucket: ", err) }
+      if cfg.Default.Debug { fmt.Printf("s3bucket.List returned %#v.\n", results) }
+      if len(results.Contents) == 0 { break } // empty request, assume we found every file
+      for _, s3obj := range results.Contents {
+        if cfg.Default.Debug { fmt.Printf("Checking whether or not %s was preloaded.\n", strings.TrimSpace(s3obj.Key)) }
+        if !loadedFiles[strings.TrimSpace(s3obj.Key)] {
+          nonLoadedFiles = append(nonLoadedFiles, s3obj.Key)
+        }
+      }
+      keyMarker = results.Contents[len(results.Contents)-1].Key
+      moreResults = results.IsTruncated
+    }
+    
+    if cfg.Default.Debug { fmt.Printf("Haven't ever loaded %#v.\n", nonLoadedFiles) }
+    for _, s3key := range nonLoadedFiles {
+      copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &s3key)
+      if cfg.Default.Debug { fmt.Printf("  Copying `%s`\n", copyStmt) }
+      _, err = db.Exec(copyStmt)
+      if err != nil { reportError("Couldn't execute default copy statement: ", err) }
+    }
+    
+    
   }
   
-  // ----------------------------- If not: run generic COPY for this Bucket/Prefix/Table -----------------------------
   
-  // ----------------------------- If yes: diff STL_FILE_SCAN with S3 bucket files list, COPY and missing files into this Table -----------------------------
   
 }
