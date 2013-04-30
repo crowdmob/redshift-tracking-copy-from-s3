@@ -13,6 +13,7 @@ import (
   "net/http"
   "io/ioutil"
   "bytes"
+  "os/signal"
   simplejson "github.com/bitly/go-simplejson"
   configfile "github.com/crowdmob/goconfig"
   _ "github.com/bmizerany/pq"
@@ -31,6 +32,7 @@ var shouldOutputVersion bool
 var cfg struct {
   Default struct {
     Debug                 bool
+    Pollsleepinseconds    int64
   }
   Aws struct {
     Region                string
@@ -95,6 +97,8 @@ func parseConfigfile() {
 
   // Everything else
   cfg.Default.Debug, err = config.GetBool("default", "debug")
+  if err != nil { reportError("Couldn't parse config: ", err) }
+  cfg.Default.Pollsleepinseconds, err = config.GetInt64("default", "pollsleepinseconds")
   if err != nil { reportError("Couldn't parse config: ", err) }
   cfg.Aws.Region, err = config.GetString("aws", "region")
   if err != nil { reportError("Couldn't parse config: ", err) }
@@ -225,114 +229,137 @@ func main() {
   if cfg.Default.Debug { fmt.Printf("Read schema json:\n %#v\n", schemaJson) }
   
   // ----------------------------- Startup goroutine for each Bucket/Prefix/Table & Repeat migration check per table ----------------------------- 
+
+
+  done := make(chan bool, len(cfg.Redshift.Tables))
+  for i, _ := range cfg.Redshift.Tables {
+    quitSignal := make(chan os.Signal, 1) 
+    signal.Notify(quitSignal, os.Interrupt)
+    
+    go func(currentTable string, currentBucket string, currentPrefix string) {
+      quitReceived := false
+      
+      go func() {
+        <-quitSignal
+        if cfg.Default.Debug { fmt.Printf("Quit signal received on %s watcher. Going down...\n",  currentTable) }
+        quitReceived = true
+      }()
   
-  currentTable  := cfg.Redshift.Tables[0]
-  currentPrefix := cfg.S3.Prefixes[0]
-  currentBucket := cfg.S3.Buckets[0]
-  
-  db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=require", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
-  if err != nil { reportError("Couldn't connect to redshift database: ", err) }
-  rows, err := db.Query(fmt.Sprintf("select COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where table_name = '%s' limit 1000", currentTable))
-  if err != nil { reportError("Couldn't execute statement for INFORMATION_SCHEMA.COLUMNS: ", err) }
-  if cfg.Default.Debug { fmt.Println("Looking for table, columns will display below.") }
-  anyRows := false
-  for rows.Next() {
-    var column_name string
-    var data_type string
-    err = rows.Scan(& column_name, & data_type)
-    if err != nil { reportError("Couldn't scan row for table: ", err) }
-    if cfg.Default.Debug { fmt.Printf("   %s, %s\n",  column_name, data_type) }
-    anyRows = true
-  }
-  
-  if !anyRows {
-    tablesArry, err := schemaJson.Get("tables").Array()
-    if err != nil { reportError("Schema json error; expected tables element to be an array: ", err) }
-    tableIndex := -1
-    for i, _ := range tablesArry { 
-      if schemaJson.Get("tables").GetIndex(i).Get("name").MustString() == currentTable {
-        tableIndex = i
-        break
+      db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=require", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
+      if err != nil { reportError("Couldn't connect to redshift database: ", err) }
+      rows, err := db.Query(fmt.Sprintf("select COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where table_name = '%s' limit 1000", currentTable))
+      if err != nil { reportError("Couldn't execute statement for INFORMATION_SCHEMA.COLUMNS: ", err) }
+      if cfg.Default.Debug { fmt.Println("Looking for table, columns will display below.") }
+      anyRows := false
+      for rows.Next() {
+        var column_name string
+        var data_type string
+        err = rows.Scan(& column_name, & data_type)
+        if err != nil { reportError("Couldn't scan row for table: ", err) }
+        if cfg.Default.Debug { fmt.Printf("   %s, %s\n",  column_name, data_type) }
+        anyRows = true
       }
-    }
-    createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"))
-    if cfg.Default.Debug {
-      fmt.Println("Creating table with:")
-      fmt.Println(createTableStmt)
-    }
-    _, err = db.Exec(createTableStmt)
-    if err != nil { reportError("Unable to create table: ", err) }
-  } else {
-    if cfg.Default.Debug { fmt.Println("Table found, will not migrate") }
-  }
-  
-  // ----------------------------- Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported. -----------------------------
-  
-  loadedFiles := map[string]bool{}
-  
-  rows, err = db.Query(fmt.Sprintf("select * from STL_FILE_SCAN"))
-  if err != nil { reportError("Couldn't execute STL_FILE_SCAN: ", err) }
-  anyRows = false
-  for rows.Next() {
-    var (
-      userid    int
-      query     int
-      slice     int
-      name      string
-      lines     int64
-      bytes     int64
-      loadtime  int64
-      curtime   time.Time
-    )
-    err = rows.Scan(&userid, &query, &slice, &name, &lines, &bytes, &loadtime, &curtime)
-    if err != nil { reportError("Couldn't scan row for STL_FILE_SCAN: ", err) }
-    if cfg.Default.Debug { fmt.Printf("  Already loaded: %d|%d|%d|%s|%d|%d|%d|%s\n", userid, query, slice, name, lines, bytes, loadtime, curtime) }
-    loadedFiles[strings.TrimSpace(name)] = true
-    anyRows = true
-  }
-  
-  // ----------------------------- If not: run generic COPY for this Bucket/Prefix/Table -----------------------------
-  if !anyRows {
-    copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &currentPrefix)
-    if cfg.Default.Debug { fmt.Printf("No records found in STL_FILE_SCAN, running `%s`\n", copyStmt) }
-    _, err = db.Exec(copyStmt)
-    if err != nil { reportError("Couldn't execute default copy statement: ", err) }
-  } else {
-    
-  // ----------------------------- If yes: diff STL_FILE_SCAN with S3 bucket files list, COPY and missing files into this Table -----------------------------
-    if cfg.Default.Debug { fmt.Printf("Records found, have to do manual copies from now on.\n") }
-    s3bucket := s3.New(aws.Auth{cfg.Aws.Accesskey, cfg.Aws.Secretkey}, aws.Regions[cfg.Aws.Region]).Bucket(currentBucket)
-    
-    // list all missing files and copy in the ones that are missing
-    nonLoadedFiles := []string{}
-    keyMarker := ""
-    moreResults := true
-    for moreResults {
-      results, err := s3bucket.List(currentPrefix, "", keyMarker, 0)
-      if err != nil { reportError("Couldn't list default s3 bucket: ", err) }
-      if cfg.Default.Debug { fmt.Printf("s3bucket.List returned %#v.\n", results) }
-      if len(results.Contents) == 0 { break } // empty request, assume we found every file
-      for _, s3obj := range results.Contents {
-        if cfg.Default.Debug { fmt.Printf("Checking whether or not %s was preloaded.\n", strings.TrimSpace(s3obj.Key)) }
-        if !loadedFiles[strings.TrimSpace(s3obj.Key)] {
-          nonLoadedFiles = append(nonLoadedFiles, s3obj.Key)
+      
+      if !anyRows {
+        tablesArry, err := schemaJson.Get("tables").Array()
+        if err != nil { reportError("Schema json error; expected tables element to be an array: ", err) }
+        tableIndex := -1
+        for i, _ := range tablesArry { 
+          if schemaJson.Get("tables").GetIndex(i).Get("name").MustString() == currentTable {
+            tableIndex = i
+            break
+          }
         }
+        createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"))
+        if cfg.Default.Debug {
+          fmt.Println("Creating table with:")
+          fmt.Println(createTableStmt)
+        }
+        _, err = db.Exec(createTableStmt)
+        if err != nil { reportError("Unable to create table: ", err) }
+      } else {
+        if cfg.Default.Debug { fmt.Println("Table found, will not migrate") }
       }
-      keyMarker = results.Contents[len(results.Contents)-1].Key
-      moreResults = results.IsTruncated
-    }
+      
+      // ----------------------------- Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported. -----------------------------
+  
+      for !quitReceived {
+        if cfg.Default.Debug { fmt.Printf("Re-polling with %s watcher.\n",  currentTable) }
+        loadedFiles := map[string]bool{}
+        
+        rows, err = db.Query(fmt.Sprintf("select * from STL_FILE_SCAN"))
+        if err != nil { reportError("Couldn't execute STL_FILE_SCAN: ", err) }
+        anyRows = false
+        for rows.Next() {
+          var (
+            userid    int
+            query     int
+            slice     int
+            name      string
+            lines     int64
+            bytes     int64
+            loadtime  int64
+            curtime   time.Time
+          )
+          err = rows.Scan(&userid, &query, &slice, &name, &lines, &bytes, &loadtime, &curtime)
+          if err != nil { reportError("Couldn't scan row for STL_FILE_SCAN: ", err) }
+          if cfg.Default.Debug { fmt.Printf("  Already loaded: %d|%d|%d|%s|%d|%d|%d|%s\n", userid, query, slice, name, lines, bytes, loadtime, curtime) }
+          loadedFiles[strings.TrimSpace(name)] = true
+          anyRows = true
+        }
+        
+        // ----------------------------- If not: run generic COPY for this Bucket/Prefix/Table -----------------------------
+        if !anyRows {
+          copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &currentPrefix)
+          if cfg.Default.Debug { fmt.Printf("No records found in STL_FILE_SCAN, running `%s`\n", copyStmt) }
+          _, err = db.Exec(copyStmt)
+          if err != nil { reportError("Couldn't execute default copy statement: ", err) }
+        } else {
+        
+        // ----------------------------- If yes: diff STL_FILE_SCAN with S3 bucket files list, COPY and missing files into this Table -----------------------------
+          if cfg.Default.Debug { fmt.Printf("Records found, have to do manual copies from now on.\n") }
+          s3bucket := s3.New(aws.Auth{cfg.Aws.Accesskey, cfg.Aws.Secretkey}, aws.Regions[cfg.Aws.Region]).Bucket(currentBucket)
+        
+          // list all missing files and copy in the ones that are missing
+          nonLoadedFiles := []string{}
+          keyMarker := ""
+          moreResults := true
+          for moreResults {
+            if cfg.Default.Debug { fmt.Printf("Checking s3 bucket %s.\n", currentBucket) }
+            results, err := s3bucket.List(currentPrefix, "", keyMarker, 0)
+            if err != nil { reportError("Couldn't list default s3 bucket: ", err) }
+            if cfg.Default.Debug { fmt.Printf("s3bucket.List returned %#v.\n", results) }
+            if len(results.Contents) == 0 { break } // empty request, assume we found every file
+            for _, s3obj := range results.Contents {
+              if cfg.Default.Debug { fmt.Printf("Checking whether or not %s was preloaded.\n", strings.TrimSpace(s3obj.Key)) }
+              if !loadedFiles[strings.TrimSpace(s3obj.Key)] {
+                nonLoadedFiles = append(nonLoadedFiles, s3obj.Key)
+              }
+            }
+            keyMarker = results.Contents[len(results.Contents)-1].Key
+            moreResults = results.IsTruncated
+          }
+        
+          if cfg.Default.Debug { fmt.Printf("Haven't ever loaded %#v.\n", nonLoadedFiles) }
+          for _, s3key := range nonLoadedFiles {
+            copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &s3key)
+            if cfg.Default.Debug { fmt.Printf("  Copying `%s`\n", copyStmt) }
+            _, err = db.Exec(copyStmt)
+            if err != nil { reportError("Couldn't execute default copy statement: ", err) }
+          }
+        
+        
+        }
+        
+        time.Sleep(time.Duration(cfg.Default.Pollsleepinseconds * 1000) * time.Millisecond)
+      }
+      
+
+      done <- true
+    }(cfg.Redshift.Tables[i], cfg.S3.Buckets[i], cfg.S3.Prefixes[i])
     
-    if cfg.Default.Debug { fmt.Printf("Haven't ever loaded %#v.\n", nonLoadedFiles) }
-    for _, s3key := range nonLoadedFiles {
-      copyStmt := defaultCopyStmt(&currentTable, &currentBucket, &s3key)
-      if cfg.Default.Debug { fmt.Printf("  Copying `%s`\n", copyStmt) }
-      _, err = db.Exec(copyStmt)
-      if err != nil { reportError("Couldn't execute default copy statement: ", err) }
-    }
-    
-    
+
   }
-  
-  
-  
+
+  <-done // wait until the last iteration finishes before returning
 }
