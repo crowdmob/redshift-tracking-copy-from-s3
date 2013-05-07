@@ -7,6 +7,7 @@ package main
 import (
   "flag"
   "fmt"
+  "log"
   "os"
   "time"
   "strings"
@@ -20,7 +21,7 @@ import (
   "database/sql"
   "github.com/crowdmob/goamz/aws"
   "github.com/crowdmob/goamz/s3"
-  // "github.com/crowdmob/goamz/exp/sns"
+  "github.com/crowdmob/goamz/exp/sns"
 )
 
 const (
@@ -69,10 +70,10 @@ func init() {
 	flag.BoolVar(&shouldOutputVersion, "v", false, "output the current version and quit")
 }
 
-func reportError(desc string, err error) {
-  // print to stderr and sns notify if required
+func reportError(desc string, err error) { // print to stderr and sns notify if required
   if cfg.Sns.FailureNotifications && len(cfg.Sns.Topic) > 0 && len(cfg.Aws.Accesskey) > 0 && len(cfg.Aws.Secretkey) > 0 {
-    // TODO FIXME call SNS
+  	_, snsErr := sns.New(aws.Auth{cfg.Aws.Accesskey, cfg.Aws.Secretkey}, aws.Regions[cfg.Aws.Region]).Publish(&sns.PublishOpt{fmt.Sprintf("%s: %#v", desc, err), "", "[redshift-tracking-copy-from-s3] ERROR Notification", cfg.Sns.Topic})
+    if snsErr != nil { log.Println(fmt.Sprintf("SNS error: %#v during report of error writing to kafka: %#v", snsErr, err)) }
   }
   fmt.Printf("%s: %s\n", desc, err)
   panic(err)
@@ -174,7 +175,7 @@ func defaultCopyStmt(currentTable *string, currentBucket *string, currentPrefix 
   return buffer.String()
 }
 
-func createTableStatement(tableName *string, columnsJson *simplejson.Json) string {
+func createTableStatement(tableName *string, columnsJson *simplejson.Json, uniqueColumns *simplejson.Json) string {
   var buffer bytes.Buffer
   buffer.WriteString("CREATE TABLE ")
   buffer.WriteString(*tableName)
@@ -200,7 +201,21 @@ func createTableStatement(tableName *string, columnsJson *simplejson.Json) strin
     if columnNull, err := columnSchema.Get("null").Bool(); err == nil && !columnNull {
       buffer.WriteString(" NOT NULL")
     }
-  } 
+  }
+
+  uniqueColumnsArry, err := uniqueColumns.Array()
+  if err == nil && len(uniqueColumnsArry) > 0 { // error would mean there weren't any uniqueColmns defined 
+    buffer.WriteString(",\nUNIQUE (")
+    for i, _ := range uniqueColumnsArry {
+      if i != 0 { buffer.WriteString(", ") }
+      uniqueColumnName, err := uniqueColumns.GetIndex(i).String()
+      if err != nil { reportError("Couldn't parse unique column name for table json: ", err) }
+      buffer.WriteString(uniqueColumnName)
+    }
+    buffer.WriteString(")")
+  }
+  
+  
   buffer.WriteString("\n);")
 
   return buffer.String()
@@ -270,7 +285,7 @@ func main() {
             break
           }
         }
-        createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"))
+        createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"), schemaJson.Get("tables").GetIndex(tableIndex).Get("unique"))
         if cfg.Default.Debug {
           fmt.Println("Creating table with:")
           fmt.Println(createTableStmt)
