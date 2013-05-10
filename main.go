@@ -175,7 +175,7 @@ func defaultCopyStmt(currentTable *string, currentBucket *string, currentPrefix 
   return buffer.String()
 }
 
-func createTableStatement(tableName *string, columnsJson *simplejson.Json, uniqueColumns *simplejson.Json) string {
+func createTableStatement(tableName *string, columnsJson *simplejson.Json, uniqueColumns *simplejson.Json, primaryKeyColumns *simplejson.Json) string {
   var buffer bytes.Buffer
   buffer.WriteString("CREATE TABLE ")
   buffer.WriteString(*tableName)
@@ -215,6 +215,17 @@ func createTableStatement(tableName *string, columnsJson *simplejson.Json, uniqu
     buffer.WriteString(")")
   }
   
+  primaryKeyColumnsArry, err := primaryKeyColumns.Array()
+  if err == nil && len(primaryKeyColumnsArry) > 0 { // error would mean there weren't any uniqueColmns defined 
+    buffer.WriteString(",\nUNIQUE (")
+    for i, _ := range primaryKeyColumnsArry {
+      if i != 0 { buffer.WriteString(", ") }
+      primaryKeyColumnName, err := primaryKeyColumns.GetIndex(i).String()
+      if err != nil { reportError("Couldn't parse primary key column name for table json: ", err) }
+      buffer.WriteString(primaryKeyColumnName)
+    }
+    buffer.WriteString(")")
+  }
   
   buffer.WriteString("\n);")
 
@@ -285,7 +296,7 @@ func main() {
             break
           }
         }
-        createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"), schemaJson.Get("tables").GetIndex(tableIndex).Get("unique"))
+        createTableStmt := createTableStatement(&currentTable, schemaJson.Get("tables").GetIndex(tableIndex).Get("columns"), schemaJson.Get("tables").GetIndex(tableIndex).Get("unique"), schemaJson.Get("tables").GetIndex(tableIndex).Get("primary_key"))
         if cfg.Default.Debug {
           fmt.Println("Creating table with:")
           fmt.Println(createTableStmt)
