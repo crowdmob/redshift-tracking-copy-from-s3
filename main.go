@@ -307,7 +307,7 @@ func main() {
         if cfg.Default.Debug { fmt.Println("Table found, will not migrate") }
       }
       
-      // ----------------------------- Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported. -----------------------------
+      // ----------------------------- Take a look at STL_FILE_SCAN on this Table to see if any files have already been imported -----------------------------
   
       for !quitReceived {
         if cfg.Default.Debug { fmt.Printf("Re-polling with %s watcher.\n",  currentTable) }
