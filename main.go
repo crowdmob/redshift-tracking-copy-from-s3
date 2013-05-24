@@ -271,7 +271,7 @@ func main() {
         quitReceived = true
       }()
   
-      db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=require", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
+      db, err := sql.Open("postgres", fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", cfg.Redshift.Host, cfg.Redshift.Port, cfg.Redshift.User, cfg.Redshift.Password, cfg.Redshift.Database))
       if err != nil { reportError("Couldn't connect to redshift database: ", err) }
       rows, err := db.Query(fmt.Sprintf("select COLUMN_NAME, DATA_TYPE from INFORMATION_SCHEMA.COLUMNS where table_name = '%s' limit 1000", currentTable))
       if err != nil { reportError("Couldn't execute statement for INFORMATION_SCHEMA.COLUMNS: ", err) }
